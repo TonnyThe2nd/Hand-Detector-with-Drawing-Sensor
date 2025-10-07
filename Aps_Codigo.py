@@ -38,6 +38,7 @@ video.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 video.set(cv2.CAP_PROP_FPS, 60)
 #função para verificar dedos levantados
 def dedo_levantado(mao, dedo_tipo, w, h):
+     #index da junta do meio do dedo e das pontas
      dedos = {
                 'Indicador': {
                     'ponta': mp_maos.HandLandmark.INDEX_FINGER_TIP,
@@ -62,7 +63,7 @@ def dedo_levantado(mao, dedo_tipo, w, h):
             }
      ponto_ponta = mao.landmark[dedos[dedo_tipo]['ponta']]
      ponto_junta = mao.landmark[dedos[dedo_tipo]['junta']]
-
+    #posição das juntas e das pontas
      y_junta = ponto_junta.y*h
      y_ponta = ponto_ponta.y*h
 
@@ -126,7 +127,8 @@ while True:
                 #valores (x,y) da posição de cada dedo
                 x = int(ponto.x * w)
                 y = int(ponto.y * h)
-                levantado =dedo_levantado(mao, nome_dedo, w, h)
+                #verifica se dedo esta levantado
+                levantado = dedo_levantado(mao, nome_dedo, w, h)
                 estado = 'Levantado' if levantado else 'Dobrado'
                 dedos_estado[nome_dedo] = levantado
                 #informações de cada dedo
@@ -143,7 +145,6 @@ while True:
                     cv2.putText(cam, f'X: {x}', (x-30,y-35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[0], 2)
                     cv2.putText(cam, f'Y: {y}', (x-30,y-55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[0], 2)
                     cv2.putText(cam, f'{estado}', (x-30,y-75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[0], 2)
-            #infos dos dedos
             
             #Verifica posição atual do dedo indicador
             pontos_atuais = (int(mao.landmark[mp_maos.HandLandmark.INDEX_FINGER_TIP].x*w),int(mao.landmark[mp_maos.HandLandmark.INDEX_FINGER_TIP].y*h))
@@ -166,6 +167,7 @@ while True:
                     historico_pontos.append(todos_pontos.copy())
                     todos_pontos.clear()
                 pontos_anteriores_desenhos = None
+    #infos dos dedos
     cv2.rectangle(cam, (0, 150), (280, 0), cores[1], -1)
     cv2.rectangle(cam, (0, 150), (280, 0), cores[0], 2)
     pos_y = 25
@@ -192,8 +194,10 @@ while True:
     if key ==  ord('q'):
         print("Saindo da câmera")
         break
+    #mostra infos dos dedos nos dedos
     elif key == ord('c'):
         verificar_coordenadas = not verificar_coordenadas
+    #ativa funcao desenho
     elif key == ord('d'):
         verificar_desenhando = not verificar_desenhando
         if not verificar_desenhando:
@@ -201,15 +205,18 @@ while True:
                 historico_pontos.append(todos_pontos)
                 todos_pontos = []
             pontos_anteriores_desenhos= None
+    #limpa desenho
     elif key == ord('x'):
         historico_pontos = []
         todos_pontos = []
         pontos_anteriores_desenhos = None
+    #troca cor do traço
     elif key == ord('m'):
         indice += 1
         if indice >= len(cores):
             indice = 0
         cor_pintura = cores[indice] 
+#encerra captura de imagem
 video.release()
 cv2.destroyAllWindows()
 
