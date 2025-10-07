@@ -24,10 +24,18 @@ todos_pontos = []
 historico_pontos = []
 
 cores = (
-    (255,255,255), #branco
-    (0,0,0), #preto
-    (0,0,255), #vermelho
-    (0,255,0) #verde
+    (255, 255, 255),  # branco
+    (0, 0, 0),        # preto
+    (0, 0, 255),      # vermelho
+    (0, 255, 0),      # verde
+    (255, 0, 0),      # azul
+    (255, 255, 0),    # amarelo
+    (255, 0, 255),    # magenta
+    (0, 255, 255),    # ciano
+    (255, 165, 0),    # laranja
+    (128, 0, 128),    # roxo
+    (128, 128, 128),  # cinza
+    (139, 69, 19)     # marrom
 )
 indice = 0
 cor_pintura = cores[indice]
@@ -142,9 +150,9 @@ while True:
                 cor = cores[3] if levantado else cores[2]
                 cv2.circle(cam, (x,y), 10, cor, -1)
                 if verificar_coordenadas:
-                    cv2.putText(cam, f'X: {x}', (x-30,y-35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[0], 2)
-                    cv2.putText(cam, f'Y: {y}', (x-30,y-55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[0], 2)
-                    cv2.putText(cam, f'{estado}', (x-30,y-75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[0], 2)
+                    cv2.putText(cam, f'X: {x}', (x-30,y-35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[1], 2)
+                    cv2.putText(cam, f'Y: {y}', (x-30,y-55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[1], 2)
+                    cv2.putText(cam, f'{estado}', (x-30,y-75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[1], 2)
             
             #Verifica posição atual do dedo indicador
             pontos_atuais = (int(mao.landmark[mp_maos.HandLandmark.INDEX_FINGER_TIP].x*w),int(mao.landmark[mp_maos.HandLandmark.INDEX_FINGER_TIP].y*h))
@@ -192,13 +200,15 @@ while True:
     #verifica se clicks no teclados foram dados
     key = cv2.waitKey(1) & 0xFF
     if key ==  ord('q'):
-        print("Saindo da câmera")
+        print("saindo da câmera")
         break
     #mostra infos dos dedos nos dedos
     elif key == ord('c'):
+        print('ativando dados')
         verificar_coordenadas = not verificar_coordenadas
     #ativa funcao desenho
     elif key == ord('d'):
+        print('ativando desenho')
         verificar_desenhando = not verificar_desenhando
         if not verificar_desenhando:
             if todos_pontos:
@@ -207,11 +217,13 @@ while True:
             pontos_anteriores_desenhos= None
     #limpa desenho
     elif key == ord('x'):
+        print('limpando tela')
         historico_pontos = []
         todos_pontos = []
         pontos_anteriores_desenhos = None
     #troca cor do traço
     elif key == ord('m'):
+        print('mudando cor')
         indice += 1
         if indice >= len(cores):
             indice = 0
