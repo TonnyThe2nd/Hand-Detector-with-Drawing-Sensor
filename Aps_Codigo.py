@@ -22,7 +22,7 @@ verificar_desenhando = False
 pontos_anteriores_desenhos = None
 todos_pontos = []
 historico_pontos = []
-
+estado_desenho = 'Parado'
 cores = (
     (255, 255, 255),  # branco
     (0, 0, 0),        # preto
@@ -195,6 +195,8 @@ while True:
     cv2.putText(cam, "3. Dedo meio LEVANTADO = Para", (1020, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
     cv2.putText(cam, "4. Aperte 'D' novamente", (1020, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
     cv2.putText(cam, "para desativar modo", (1020, 165), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
+    cor_texto_aviso = cores[3] if verificar_desenhando else cores[2]
+    cv2.putText(cam, estado_desenho, (1020, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.8, cor_texto_aviso, 2)
     cv2.imshow('Camera', cam)
 
     #verifica se clicks no teclados foram dados
@@ -210,6 +212,7 @@ while True:
     elif key == ord('d'):
         print('ativando desenho')
         verificar_desenhando = not verificar_desenhando
+        estado_desenho = 'Desenhando' if verificar_desenhando or dedos_estado['Meio'] else 'Parado'
         if not verificar_desenhando:
             if todos_pontos:
                 historico_pontos.append(todos_pontos)
