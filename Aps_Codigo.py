@@ -1,8 +1,8 @@
 import cv2
 import mediapipe as mp
 import math
-import numpy
-
+import numpy as np
+import tensorflow as tf
 #IA que reconhece mão
 mp_maos = mp.solutions.hands
 #Desenho do mapa da mão
@@ -39,6 +39,10 @@ cores = (
 )
 indice = 0
 cor_pintura = cores[indice]
+
+#carrega modelo de cnn
+
+modelo = tf.keras.models.load_model('modelo.h5')
 video = cv2.VideoCapture(0)
 #Configurações do tamanho do frame e do fps
 video.set(cv2.CAP_PROP_FRAME_HEIGHT,720)
@@ -82,6 +86,8 @@ def dedo_levantado(mao, dedo_tipo, w, h):
      else:
         levantado = y_junta > y_ponta
         return levantado
+     
+counter = 0
 while True:
     ret, cam = video.read()
     #Verifica se a câmera foi encontrada
@@ -107,6 +113,40 @@ while True:
     if detectar_mao.multi_hand_landmarks:
         #para cada traço detectado na mão
         for mao in detectar_mao.multi_hand_landmarks:
+            lm_array = []
+            for ranges in mao.landmark:
+                x = int(ranges.x * cam.shape[1])
+                y = int(ranges.y * cam.shape[0])
+                lm_array.append((x, y))
+
+            xs = [p[0] for p in lm_array]
+            ys = [p[1] for p in lm_array]
+
+            xmin, xmax = min(xs) - 15, max(xs) + 15
+            ymin, ymax = min(ys) - 15, max(ys) + 15
+            h, w, _ = cam.shape
+            xmin = max(0, xmin)
+            ymin = max(0, ymin)
+            xmax = min(w, xmax)
+            ymax = min(h, ymax)
+
+            frame_analise = cam[ymin:ymax, xmin:xmax]
+
+            if frame_analise.size > 0:
+                frame_analise = cv2.cvtColor(frame_analise, cv2.COLOR_BGR2RGB)
+                frame_analise = cv2.resize(frame_analise, (128, 128))
+                frame_analise = frame_analise.astype('float32') / 255.0
+                frame_analise = np.expand_dims(frame_analise, axis=0)
+
+                counter += 1
+                if counter % 5 == 0:
+                    resultado = modelo.predict(frame_analise, verbose=0)
+                    classe_predita = np.argmax(resultado)
+                    cv2.putText(cam, f"Classe: {classe_predita}", (xmin, ymin - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+            cv2.rectangle(cam, (xmin, ymin), (xmax, ymax), cores[1], 2)
+            
             #desenha a conexão entre os dedos e o centro da mão
             mp_desenho.draw_landmarks(cam, mao, mp_maos.HAND_CONNECTIONS)
             h, w, c = cam.shape
@@ -235,3 +275,22 @@ while True:
 video.release()
 cv2.destroyAllWindows()
 
+
+
+
+def traduz_emocao(emocao):
+    match emocao:
+        case 'sad':
+            return 'triste'
+        case 'happy':
+            return 'feliz'
+        case 'disgust':
+            return 'enojado'
+        case 'fear':
+            return 'medo'
+        case 'surprise':
+            return 'surpreso'
+        case 'angry': 
+            return 'raiva'
+        case 'neutral':
+            return 'neutro'
