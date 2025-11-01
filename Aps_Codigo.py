@@ -1,29 +1,34 @@
+# realtime_hand_app_fixed.py
+"""
+Versão corrigida e com melhorias:
+- Salvamento correto de strokes ao parar de desenhar.
+- Leitura robusta de class_indices.json.
+- Pré-processamento consistente do ROI (BGR->RGB, pad->square, resize, normalize).
+- Proteções contra ROI inválida / índices fora do range.
+- Mensagens de debug úteis.
+"""
 import cv2
 import mediapipe as mp
 import math
 import numpy as np
 import tensorflow as tf
-#IA que reconhece mão
-mp_maos = mp.solutions.hands
-#Desenho do mapa da mão
-mp_desenho = mp.solutions.drawing_utils
-#Estilo do desenho do mapa da mão
-mp_estilo_desenho = mp.solutions.drawing_styles
-#Configuração do detector
-maos_detec_config = mp_maos.Hands(
-    max_num_hands = 1, #Num maximo de mãos reconhecidas
-    min_detection_confidence = 0.8, #Certeza de conhecimento da mão
-    min_tracking_confidence = 0.7, #Confiança de tracking
-    static_image_mode = False #config para tela dinamica
-)
-#variaveis e arrays
-verificar_coordenadas = False
-verificar_desenhando = False
-pontos_anteriores_desenhos = None
-todos_pontos = []
-historico_pontos = []
-estado_desenho = 'Parado'
-cores = (
+import json
+import time
+import os
+
+# ------- Configurações -------
+MODEL_PATH = 'modelo.h5'
+CLASS_INDICES_PATH = 'class_indices.json'
+CAMERA_ID = 0
+FRAME_WIDTH = 1280
+FRAME_HEIGHT = 720
+FPS = 30
+PREDICT_INTERVAL_SEC = 0.18  # 5-6 predições por segundo
+MIN_CONFIDENCE = 0.6
+IMG_SIZE = (128, 128)
+
+# Cores (BGR)
+CORES = [
     (255, 255, 255),  # branco
     (0, 0, 0),        # preto
     (0, 0, 255),      # vermelho
@@ -36,261 +41,312 @@ cores = (
     (128, 0, 128),    # roxo
     (128, 128, 128),  # cinza
     (139, 69, 19)     # marrom
+]
+
+# ------- Carrega modelo e nomes de classes -------
+try:
+    modelo = tf.keras.models.load_model(MODEL_PATH)
+    print("Modelo carregado:", MODEL_PATH)
+except Exception as e:
+    print("Erro ao carregar modelo:", e)
+    modelo = None
+
+# Carrega class indices de maneira robusta
+if os.path.exists(CLASS_INDICES_PATH):
+    try:
+        with open(CLASS_INDICES_PATH, 'r') as f:
+            class_indices = json.load(f)
+        # class_indices pode ser {"W": 0, "X": 1, ...} ou similar
+        # vamos construir uma lista onde index -> nome da classe
+        if isinstance(class_indices, dict):
+            max_idx = max(class_indices.values())
+            CLASS_NAMES = [None] * (max_idx + 1)
+            for name, idx in class_indices.items():
+                if 0 <= idx <= max_idx:
+                    CLASS_NAMES[idx] = name
+            # substitui None por nome generico (se houver)
+            for i in range(len(CLASS_NAMES)):
+                if CLASS_NAMES[i] is None:
+                    CLASS_NAMES[i] = f'Classe_{i}'
+        else:
+            CLASS_NAMES = [str(x) for x in class_indices]
+        print("Nomes de classes carregados do JSON.")
+    except Exception as e:
+        print("Erro ao ler class_indices.json:", e)
+        CLASS_NAMES = [f'Classe_{i}' for i in range(21)]
+        print("Usando nomes genéricos.")
+else:
+    CLASS_NAMES = [f'Classe_{i}' for i in range(21)]
+    print("Arquivo class_indices.json não encontrado. Usando nomes genéricos (ajuste se necessário).")
+
+# ------- MediaPipe Hands config -------
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands_detector = mp_hands.Hands(
+    max_num_hands=1,
+    min_detection_confidence=0.8,
+    min_tracking_confidence=0.7,
+    static_image_mode=False
 )
-indice = 0
-cor_pintura = cores[indice]
 
-#carrega modelo de cnn
+# ------- Estado do app -------
+verificar_coordenadas = False
+verificar_desenhando = False
+pontos_anteriores_desenhos = None
+todos_pontos = []
+historico_pontos = []
+indice_cor = 0
+cor_pintura = CORES[indice_cor]
+estado_desenho = 'Parado'
 
-modelo = tf.keras.models.load_model('modelo.h5')
-video = cv2.VideoCapture(0)
-#Configurações do tamanho do frame e do fps
-video.set(cv2.CAP_PROP_FRAME_HEIGHT,720)
-video.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-video.set(cv2.CAP_PROP_FPS, 60)
-#função para verificar dedos levantados
+last_predict_time = 0.0
+
+# --- Funções utilitárias ---
 def dedo_levantado(mao, dedo_tipo, w, h):
-     #index da junta do meio do dedo e das pontas
-     dedos = {
-                'Indicador': {
-                    'ponta': mp_maos.HandLandmark.INDEX_FINGER_TIP,
-                    'junta': mp_maos.HandLandmark.INDEX_FINGER_PIP
-                },
-                'Meio': {
-                    'ponta': mp_maos.HandLandmark.MIDDLE_FINGER_TIP,
-                    'junta': mp_maos.HandLandmark.MIDDLE_FINGER_PIP
-                },
-                'Anelar': {
-                    'ponta': mp_maos.HandLandmark.RING_FINGER_TIP,
-                    'junta': mp_maos.HandLandmark.RING_FINGER_PIP
-                },
-                'Mindinho': {
-                    'ponta': mp_maos.HandLandmark.PINKY_TIP,
-                    'junta': mp_maos.HandLandmark.PINKY_PIP
-                },
-                'Dedão': {
-                    'ponta': mp_maos.HandLandmark.THUMB_TIP,
-                    'junta': mp_maos.HandLandmark.THUMB_IP  
-                }
-            }
-     ponto_ponta = mao.landmark[dedos[dedo_tipo]['ponta']]
-     ponto_junta = mao.landmark[dedos[dedo_tipo]['junta']]
-    #posição das juntas e das pontas
-     y_junta = ponto_junta.y*h
-     y_ponta = ponto_ponta.y*h
+    """Retorna True se dedo estiver levantado (heurística simples)."""
+    dedos = {
+        'Indicador': {'ponta': mp_hands.HandLandmark.INDEX_FINGER_TIP, 'junta': mp_hands.HandLandmark.INDEX_FINGER_PIP},
+        'Meio': {'ponta': mp_hands.HandLandmark.MIDDLE_FINGER_TIP, 'junta': mp_hands.HandLandmark.MIDDLE_FINGER_PIP},
+        'Anelar': {'ponta': mp_hands.HandLandmark.RING_FINGER_TIP, 'junta': mp_hands.HandLandmark.RING_FINGER_PIP},
+        'Mindinho': {'ponta': mp_hands.HandLandmark.PINKY_TIP, 'junta': mp_hands.HandLandmark.PINKY_PIP},
+        'Dedão': {'ponta': mp_hands.HandLandmark.THUMB_TIP, 'junta': mp_hands.HandLandmark.THUMB_IP}
+    }
+    try:
+        ponta = mao.landmark[dedos[dedo_tipo]['ponta']]
+        junta = mao.landmark[dedos[dedo_tipo]['junta']]
+    except Exception:
+        return False
 
-     if dedo_tipo == 'Dedão':
-         x_ponta = ponto_ponta.x*w
-         x_junta = ponto_junta.x*w
-         return x_ponta < x_junta
-     else:
-        levantado = y_junta > y_ponta
-        return levantado
-     
-counter = 0
-while True:
-    ret, cam = video.read()
-    #Verifica se a câmera foi encontrada
-    if not ret: 
+    y_junta = junta.y * h
+    y_ponta = ponta.y * h
+
+    if dedo_tipo == 'Dedão':
+        x_ponta = ponta.x * w
+        x_junta = junta.x * w
+        # leva em conta espelhamento (flip horizontal)
+        return x_ponta < x_junta
+    else:
+        return y_ponta < y_junta
+
+def pad_to_square(img):
+    """Recebe imagem (H,W,3) e retorna imagem quadrada com padding preto centralizada."""
+    h, w = img.shape[:2]
+    if h == w:
+        return img
+    size = max(h, w)
+    top = (size - h) // 2
+    bottom = size - h - top
+    left = (size - w) // 2
+    right = size - w - left
+    padded = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(0,0,0))
+    return padded
+
+def preprocess_roi_for_model(frame_roi):
+    """Recebe ROI BGR e devolve array pronto para model.predict (1, H, W, 3)."""
+    # Convert BGR -> RGB
+    roi_rgb = cv2.cvtColor(frame_roi, cv2.COLOR_BGR2RGB)
+    # Pad to square to preserve aspect ratio
+    roi_square = pad_to_square(roi_rgb)
+    # Resize
+    roi_resized = cv2.resize(roi_square, IMG_SIZE, interpolation=cv2.INTER_AREA)
+    # Normalize
+    roi_normalized = roi_resized.astype('float32') / 255.0
+    # Batch dim
+    x = np.expand_dims(roi_normalized, axis=0)
+    return x
+
+def predict_roi(frame_roi):
+    """Recebe ROI em BGR e retorna (classe_nome, confidence) ou (None, conf)."""
+    global modelo, CLASS_NAMES
+    if modelo is None:
+        return None, 0.0
+    try:
+        x = preprocess_roi_for_model(frame_roi)
+        preds = modelo.predict(x, verbose=0)
+        idx = int(np.argmax(preds))
+        conf = float(np.max(preds))
+        if conf < MIN_CONFIDENCE:
+            return None, conf
+        name = CLASS_NAMES[idx] if 0 <= idx < len(CLASS_NAMES) else f'Classe_{idx}'
+        return name, conf
+    except Exception as e:
+        print("Erro na predição:", e)
+        return None, 0.0
+
+# ------- Main loop -------
+def main():
+    global verificar_coordenadas, verificar_desenhando, pontos_anteriores_desenhos
+    global todos_pontos, historico_pontos, cor_pintura, indice_cor, estado_desenho
+    global last_predict_time
+
+    cap = cv2.VideoCapture(CAMERA_ID)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, FPS)
+
+    if not cap.isOpened():
         print("Não foi possível abrir a câmera")
-        break
-    #Inverte a câmera para ficar na posição certa
-    cam = cv2.flip(cam, 1)
+        return
 
-    #mantem frame em rgb
-    frame_rgb = cv2.cvtColor(cam, cv2.COLOR_BGR2RGB)
-    #desenha todos os pixels dentro do array
-    for i in historico_pontos:
-        for j in range(1, len(i)):
-            cv2.line(cam, i[j-1], i[j],cor_pintura, 5)
-    for i in range(1, len(todos_pontos)):
-        cv2.line(cam, todos_pontos[i-1], todos_pontos[i],cor_pintura, 5)
-                   
-    #processa frame e identifica a mão
-    detectar_mao = maos_detec_config.process(frame_rgb)
-    dedos_index = {}
-    #verifica se mão foi detectada
-    if detectar_mao.multi_hand_landmarks:
-        #para cada traço detectado na mão
-        for mao in detectar_mao.multi_hand_landmarks:
-            lm_array = []
-            for ranges in mao.landmark:
-                x = int(ranges.x * cam.shape[1])
-                y = int(ranges.y * cam.shape[0])
-                lm_array.append((x, y))
+    print("Iniciando captura. Pressione 'q' para sair.")
 
-            xs = [p[0] for p in lm_array]
-            ys = [p[1] for p in lm_array]
+    while True:
+        ret, cam = cap.read()
+        if not ret:
+            print("Frame não lido da câmera.")
+            break
 
-            xmin, xmax = min(xs) - 15, max(xs) + 15
-            ymin, ymax = min(ys) - 15, max(ys) + 15
-            h, w, _ = cam.shape
-            xmin = max(0, xmin)
-            ymin = max(0, ymin)
-            xmax = min(w, xmax)
-            ymax = min(h, ymax)
+        cam = cv2.flip(cam, 1)
+        h, w, _ = cam.shape
+        frame_rgb = cv2.cvtColor(cam, cv2.COLOR_BGR2RGB)
 
-            frame_analise = cam[ymin:ymax, xmin:xmax]
+        # desenha histórico de strokes e o stroke atual
+        for stroke in historico_pontos:
+            for i in range(1, len(stroke)):
+                cv2.line(cam, stroke[i - 1], stroke[i], cor_pintura, 5)
+        for i in range(1, len(todos_pontos)):
+            cv2.line(cam, todos_pontos[i - 1], todos_pontos[i], cor_pintura, 5)
 
-            if frame_analise.size > 0:
-                frame_analise = cv2.cvtColor(frame_analise, cv2.COLOR_BGR2RGB)
-                frame_analise = cv2.resize(frame_analise, (128, 128))
-                frame_analise = frame_analise.astype('float32') / 255.0
-                frame_analise = np.expand_dims(frame_analise, axis=0)
+        results = hands_detector.process(frame_rgb)
+        dedos_index = {}
+        dedos_estado = {}
 
-                counter += 1
-                if counter % 5 == 0:
-                    resultado = modelo.predict(frame_analise, verbose=0)
-                    classe_predita = np.argmax(resultado)
-                    cv2.putText(cam, f"Classe: {classe_predita}", (xmin, ymin - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        estado_desenho = 'Desenhando' if verificar_desenhando else 'Parado'
 
-            cv2.rectangle(cam, (xmin, ymin), (xmax, ymax), cores[1], 2)
-            
-            #desenha a conexão entre os dedos e o centro da mão
-            mp_desenho.draw_landmarks(cam, mao, mp_maos.HAND_CONNECTIONS)
-            h, w, c = cam.shape
-            dedos = {
-                'Indicador': {
-                    'ponta': mp_maos.HandLandmark.INDEX_FINGER_TIP
-                },
-                'Meio': {
-                    'ponta': mp_maos.HandLandmark.MIDDLE_FINGER_TIP
-                },
-                'Anelar': {
-                    'ponta': mp_maos.HandLandmark.RING_FINGER_TIP
-                },
-                'Mindinho': {
-                    'ponta': mp_maos.HandLandmark.PINKY_TIP
-                },
-                'Dedão': {
-                    'ponta': mp_maos.HandLandmark.THUMB_TIP
+        if results.multi_hand_landmarks:
+            for mao in results.multi_hand_landmarks:
+                lm_array = []
+                for lm in mao.landmark:
+                    lm_array.append((int(lm.x * w), int(lm.y * h)))
+
+                xs = [p[0] for p in lm_array]
+                ys = [p[1] for p in lm_array]
+                xmin, xmax = max(0, min(xs) - 15), min(w, max(xs) + 15)
+                ymin, ymax = max(0, min(ys) - 15), min(h, max(ys) + 15)
+
+                # Proteção ROI
+                if xmax - xmin <= 10 or ymax - ymin <= 10:
+                    # ROI muito pequena -> pular
+                    continue
+
+                frame_analise = cam[ymin:ymax, xmin:xmax].copy()
+                if frame_analise.size == 0:
+                    continue
+
+                # Predição em intervalos definidos
+                now = time.time()
+                if now - last_predict_time >= PREDICT_INTERVAL_SEC:
+                    nome, conf = predict_roi(frame_analise)
+                    last_predict_time = now
+                    if nome is not None:
+                        cv2.putText(cam, f"{nome}: {conf:.2f}", (xmin, max(20, ymin - 10)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    else:
+                        # para debugging, opcional:
+                        # cv2.putText(cam, f"Sem conf >= {MIN_CONFIDENCE:.2f}", (xmin, max(20, ymin - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+                        pass
+
+                # Desenha retângulo de ROI (opcional)
+                cv2.rectangle(cam, (xmin, ymin), (xmax, ymax), CORES[0], 1)
+
+                # verifica dedos
+                dedos = {
+                    'Indicador': {'ponta': mp_hands.HandLandmark.INDEX_FINGER_TIP},
+                    'Meio': {'ponta': mp_hands.HandLandmark.MIDDLE_FINGER_TIP},
+                    'Anelar': {'ponta': mp_hands.HandLandmark.RING_FINGER_TIP},
+                    'Mindinho': {'ponta': mp_hands.HandLandmark.PINKY_TIP},
+                    'Dedão': {'ponta': mp_hands.HandLandmark.THUMB_TIP}
                 }
-            }
-            dedos_estado = {}
-            #itera sobre o dicionario dedos
-            for nome_dedo, index in dedos.items():
-                #mapeia os index para cada dedo detectado
-                ponto = mao.landmark[index['ponta']]
-                #valores (x,y) da posição de cada dedo
-                x = int(ponto.x * w)
-                y = int(ponto.y * h)
-                #verifica se dedo esta levantado
-                levantado = dedo_levantado(mao, nome_dedo, w, h)
-                estado = 'Levantado' if levantado else 'Dobrado'
-                dedos_estado[nome_dedo] = levantado
-                #informações de cada dedo
-                dedos_index[nome_dedo] = {
-                    'X' : x,
-                    'Y' : y,
-                    'Dedo' : nome_dedo,
-                    'Estado' :  estado
-                }
-                #alteração visual para cada dedo na tela
-                cor = cores[3] if levantado else cores[2]
-                cv2.circle(cam, (x,y), 10, cor, -1)
-                if verificar_coordenadas:
-                    cv2.putText(cam, f'X: {x}', (x-30,y-35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[1], 2)
-                    cv2.putText(cam, f'Y: {y}', (x-30,y-55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[1], 2)
-                    cv2.putText(cam, f'{estado}', (x-30,y-75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[1], 2)
-            
-            #Verifica posição atual do dedo indicador
-            pontos_atuais = (int(mao.landmark[mp_maos.HandLandmark.INDEX_FINGER_TIP].x*w),int(mao.landmark[mp_maos.HandLandmark.INDEX_FINGER_TIP].y*h))
-            if verificar_desenhando and not dedos_estado['Meio']:
-                if pontos_anteriores_desenhos is not None:
-                    # pequeno filtro de movimento para reduzir jitter
-                    dx = pontos_atuais[0] - pontos_anteriores_desenhos[0]
-                    dy = pontos_atuais[1] - pontos_anteriores_desenhos[1]
-                    dist = math.hypot(dx, dy)
-                    if dist > 3:  # ajuste esse valor conforme necessidade
+
+                for nome_dedo, info in dedos.items():
+                    ponto = mao.landmark[info['ponta']]
+                    x = int(ponto.x * w)
+                    y = int(ponto.y * h)
+                    levantado = dedo_levantado(mao, nome_dedo, w, h)
+                    estado = 'Levantado' if levantado else 'Dobrado'
+                    dedos_estado[nome_dedo] = levantado
+                    dedos_index[nome_dedo] = {'X': x, 'Y': y, 'Dedo': nome_dedo, 'Estado': estado}
+                    cor = CORES[3] if levantado else CORES[2]
+                    if verificar_coordenadas:
+                        cv2.putText(cam, f'X:{x}', (x - 30, y - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, CORES[0], 1)
+                        cv2.putText(cam, f'Y:{y}', (x - 30, y - 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, CORES[0], 1)
+                        cv2.putText(cam, f'{estado}', (x - 30, y - 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, CORES[0], 1)
+
+                # Lógica de desenho usando dedo indicador como ponta e dedo médio como gatilho
+                pontos_atuais = (int(mao.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP].x * w),
+                                 int(mao.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP].y * h))
+
+                # Se estamos em modo desenhar E dedo medio está ABAIXADO (não levantado)
+                if verificar_desenhando and (not dedos_estado.get('Meio', True)):
+                    # dedo medio ABAIXADO => desenhar
+                    if pontos_anteriores_desenhos is not None:
+                        dx = pontos_atuais[0] - pontos_anteriores_desenhos[0]
+                        dy = pontos_atuais[1] - pontos_anteriores_desenhos[1]
+                        dist = math.hypot(dx, dy)
+                        if dist > 3:  # filtro para reduzir jitter
+                            todos_pontos.append(pontos_atuais)
+                            cv2.line(cam, pontos_anteriores_desenhos, pontos_atuais, cor_pintura, 5)
+                    else:
                         todos_pontos.append(pontos_atuais)
-                        cv2.line(cam, pontos_anteriores_desenhos, pontos_atuais, cor_pintura, 5)
+                    pontos_anteriores_desenhos = pontos_atuais
                 else:
-                    # primeiro ponto do stroke atual (não desenha linha, só registra)
-                    todos_pontos.append(pontos_atuais)
-                pontos_anteriores_desenhos = pontos_atuais
-            else:
-                # quando o dedo do meio é levantado (parou de desenhar),
-                if verificar_desenhando and pontos_anteriores_desenhos is not None and len(todos_pontos) > 0:
+                    # parou de desenhar: salva stroke (nota: removi checagem que dependia de verificar_desenhando)
+                    if pontos_anteriores_desenhos is not None and len(todos_pontos) > 0:
+                        historico_pontos.append(todos_pontos.copy())
+                        todos_pontos = []
+                    pontos_anteriores_desenhos = None
+
+        # Desenha painel de info dedos
+        cv2.rectangle(cam, (0, 0), (280, 150), CORES[1], -1)
+        cv2.rectangle(cam, (0, 0), (280, 150), CORES[0], 2)
+        pos_y = 25
+        for i, (nome_dedo, info) in enumerate(dedos_index.items()):
+            texto = f"{nome_dedo}: ({info['X']},{info['Y']}) {info['Estado']}"
+            cv2.putText(cam, texto, (10, pos_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, CORES[0], 1)
+            pos_y += 25
+
+        # Caixa de comandos
+        cv2.rectangle(cam, (1000, 0), (1280, 210), CORES[1], -1)
+        cv2.rectangle(cam, (1000, 0), (1280, 210), CORES[0], 2)
+        cv2.putText(cam, "COMANDOS", (1020, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, CORES[0], 2)
+        cv2.putText(cam, "Q - Fechar   D - Desenhar", (1020, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.45, CORES[0], 1)
+        cv2.putText(cam, "X - Limpar    M - Mudar Cor", (1020, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.45, CORES[0], 1)
+        cv2.putText(cam, "C - Coordenadas", (1020, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.45, CORES[0], 1)
+        cv2.putText(cam, "Para desenhar: ative 'D' e mantenha dedo medio ABAIXADO", (1020, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.37, CORES[2], 1)
+        cor_texto_aviso = CORES[3] if verificar_desenhando else CORES[2]
+        cv2.putText(cam, estado_desenho, (1020, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, cor_texto_aviso, 2)
+
+        cv2.imshow('Camera', cam)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            print("Saindo...")
+            break
+        elif key == ord('c'):
+            verificar_coordenadas = not verificar_coordenadas
+            print("Coordenadas:", verificar_coordenadas)
+        elif key == ord('d'):
+            verificar_desenhando = not verificar_desenhando
+            estado_desenho = 'Desenhando' if verificar_desenhando else 'Parado'
+            # ao desativar, salva stroke atual
+            if not verificar_desenhando:
+                if todos_pontos:
                     historico_pontos.append(todos_pontos.copy())
-                    todos_pontos.clear()
+                    todos_pontos = []
                 pontos_anteriores_desenhos = None
-    #infos dos dedos
-    cv2.rectangle(cam, (0, 150), (280, 0), cores[1], -1)
-    cv2.rectangle(cam, (0, 150), (280, 0), cores[0], 2)
-    pos_y = 25
-    for i, (nome_dedo, info) in enumerate(dedos_index.items()):
-        texto = f"{nome_dedo}: ({info['X']},{info['Y']}) / {info['Estado']}"
-        cv2.putText(cam, texto, (10, pos_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
-        pos_y += 25
-    #Caixa de tags de comando
-    cv2.rectangle(cam, (1000, 170), (1280, 0), cores[1], -1)
-    cv2.rectangle(cam, (1000, 170), (1280, 0), cores[0], 2)
-    cv2.putText(cam, "COMANDOS", (1020, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, cores[0], 2)
-    cv2.putText(cam, "Q-Fechar  D-Desenhar", (1020, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
-    cv2.putText(cam, "X-Apagar M - Mudar Cor", (1020, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
-    cv2.putText(cam, "PARA DESENHAR:", (1020, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores[2], 1)
-    cv2.putText(cam, "1. Aperte 'D' para ativar", (1020, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
-    cv2.putText(cam, "2. Dedo meio ABAIXADO = Desenha", (1020, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
-    cv2.putText(cam, "3. Dedo meio LEVANTADO = Para", (1020, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
-    cv2.putText(cam, "4. Aperte 'D' novamente", (1020, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
-    cv2.putText(cam, "para desativar modo", (1020, 165), cv2.FONT_HERSHEY_SIMPLEX, 0.4, cores[0], 1)
-    cor_texto_aviso = cores[3] if verificar_desenhando else cores[2]
-    cv2.putText(cam, estado_desenho, (1020, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.8, cor_texto_aviso, 2)
-    cv2.imshow('Camera', cam)
+            print("Desenhar:", verificar_desenhando)
+        elif key == ord('x'):
+            historico_pontos = []
+            todos_pontos = []
+            pontos_anteriores_desenhos = None
+            print("Tela limpa")
+        elif key == ord('m'):
+            indice_cor = (indice_cor + 1) % len(CORES)
+            cor_pintura = CORES[indice_cor]
+            print("Cor alterada:", cor_pintura)
 
-    #verifica se clicks no teclados foram dados
-    key = cv2.waitKey(1) & 0xFF
-    if key ==  ord('q'):
-        print("saindo da câmera")
-        break
-    #mostra infos dos dedos nos dedos
-    elif key == ord('c'):
-        print('ativando dados')
-        verificar_coordenadas = not verificar_coordenadas
-    #ativa funcao desenho
-    elif key == ord('d'):
-        print('ativando desenho')
-        verificar_desenhando = not verificar_desenhando
-        estado_desenho = 'Desenhando' if verificar_desenhando or dedos_estado['Meio'] else 'Parado'
-        if not verificar_desenhando:
-            if todos_pontos:
-                historico_pontos.append(todos_pontos)
-                todos_pontos = []
-            pontos_anteriores_desenhos= None
-    #limpa desenho
-    elif key == ord('x'):
-        print('limpando tela')
-        historico_pontos = []
-        todos_pontos = []
-        pontos_anteriores_desenhos = None
-    #troca cor do traço
-    elif key == ord('m'):
-        print('mudando cor')
-        indice += 1
-        if indice >= len(cores):
-            indice = 0
-        cor_pintura = cores[indice] 
-#encerra captura de imagem
-video.release()
-cv2.destroyAllWindows()
+    cap.release()
+    cv2.destroyAllWindows()
 
-
-
-
-def traduz_emocao(emocao):
-    match emocao:
-        case 'sad':
-            return 'triste'
-        case 'happy':
-            return 'feliz'
-        case 'disgust':
-            return 'enojado'
-        case 'fear':
-            return 'medo'
-        case 'surprise':
-            return 'surpreso'
-        case 'angry': 
-            return 'raiva'
-        case 'neutral':
-            return 'neutro'
+if __name__ == '__main__':
+    main()

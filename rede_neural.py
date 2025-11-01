@@ -1,91 +1,117 @@
-import tensorflow as tf
-import matplotlib.pyplot as plt
+import cv2
+import mediapipe as mp
 import numpy as np
+import tensorflow as tf
+import time
+import os
 
-PATH_TRAINING = 'train'
-PATH_TESTING = 'test'
+# === Configurações ===
+MODEL_PATH = 'modelo.h5'
+CAMERA_ID = 0
+FRAME_WIDTH = 1280
+FRAME_HEIGHT = 720
+FPS = 30
+PREDICT_INTERVAL_SEC = 0.18  # tempo entre predições
+MIN_CONFIDENCE = 0.6
+IMG_SIZE = (128, 128)  # tamanho usado no treino
 
-image_data_gen = tf.keras.preprocessing.image.ImageDataGenerator(
-    rescale=1./255,
-    validation_split = 0.2,
-    width_shift_range = 0.2,
-    height_shift_range=0.2,
-    rotation_range=20,
-    shear_range=0.2,
-    zoom_range=0.2,
-    horizontal_flip=True,
-    fill_mode='nearest'
+# === Cores ===
+CORES = [
+    (255, 255, 255), (0, 0, 0), (0, 0, 255), (0, 255, 0),
+    (255, 0, 0), (255, 255, 0), (255, 0, 255), (0, 255, 255),
+    (255, 165, 0), (128, 0, 128), (128, 128, 128), (139, 69, 19)
+]
+
+# === Carrega modelo ===
+modelo = tf.keras.models.load_model(MODEL_PATH)
+print("Input shape do modelo:", modelo.input_shape)
+print("Output shape do modelo:", modelo.output_shape)
+
+# === Descobre classes a partir da pasta de treino ===
+TRAIN_PATH = 'train'
+CLASS_NAMES = sorted(os.listdir(TRAIN_PATH))  # ordena alfabeticamente
+print("Classes detectadas:", CLASS_NAMES)
+
+# === Inicializa MediaPipe Hands ===
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands_detector = mp_hands.Hands(
+    max_num_hands=1,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7,
+    static_image_mode=False
 )
 
-val_data_gen = tf.keras.preprocessing.image.ImageDataGenerator(rescale = 1./255, validation_split=0.2)
+# === Controle de predição ===
+last_predict_time = 0.0
 
-training_images = image_data_gen.flow_from_directory(
-    PATH_TRAINING,
-    target_size=(128,128),
-    shuffle=True,
-    seed=10,
-    class_mode='categorical',
-    batch_size=64,
-    subset='training'
-)
+def predict_roi(frame_roi):
+    """Recebe ROI BGR e retorna (classe_nome, confidence)"""
+    try:
+        roi_rgb = cv2.cvtColor(frame_roi, cv2.COLOR_BGR2RGB)
+        roi_resized = cv2.resize(roi_rgb, IMG_SIZE, interpolation=cv2.INTER_AREA)
+        roi_normalized = roi_resized.astype('float32') / 255.0
+        x = np.expand_dims(roi_normalized, axis=0)
+        preds = modelo.predict(x, verbose=0)
+        idx = int(np.argmax(preds))
+        conf = float(np.max(preds))
+        if conf < MIN_CONFIDENCE:
+            return None, conf
+        name = CLASS_NAMES[idx] if idx < len(CLASS_NAMES) else f'Classe_{idx}'
+        return name, conf
+    except Exception as e:
+        print("Erro na predição:", e)
+        return None, 0.0
 
-validation_images = val_data_gen.flow_from_directory(
-    PATH_TRAINING,
-    target_size=(128,128),
-    shuffle=False,
-    seed=10,
-    class_mode='categorical',
-    batch_size=64,
-    subset='validation'
-)
+# === Função principal ===
+def main():
+    global last_predict_time
 
-test_image_gen = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1./255)
-test_images = test_image_gen.flow_from_directory(
-    PATH_TESTING,
-    target_size=(128,128),
-    shuffle=False,
-    seed=10,
-    class_mode='categorical',
-    batch_size=64
-)
+    cap = cv2.VideoCapture(CAMERA_ID)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, FPS)
 
-print(str(list(training_images.class_indices)))
+    if not cap.isOpened():
+        print("Não foi possível abrir a câmera")
+        return
 
-model = tf.keras.models.Sequential()
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-model.add(tf.keras.layers.Conv2D(32, kernel_size=3, activation='relu',input_shape=(128,128,3)))
-model.add(tf.keras.layers.MaxPooling2D(pool_size=2))
-model.add(tf.keras.layers.Conv2D(32, kernel_size=3, activation='relu'))
-model.add(tf.keras.layers.MaxPooling2D(pool_size=2))
-model.add(tf.keras.layers.Dropout(0.2))
-model.add(tf.keras.layers.Conv2D(64, kernel_size=3, activation='relu'))
-model.add(tf.keras.layers.Conv2D(64, kernel_size=3, activation='relu'))
-model.add(tf.keras.layers.MaxPooling2D(pool_size=2))
-model.add(tf.keras.layers.Dropout(0.2))
-model.add(tf.keras.layers.Conv2D(128, kernel_size=3, activation='relu'))
-model.add(tf.keras.layers.MaxPooling2D(pool_size=2))
-model.add(tf.keras.layers.Flatten())
-model.add(tf.keras.layers.Dense(256, activation='relu'))
-model.add(tf.keras.layers.Dense(256, activation='relu'))
-model.add(tf.keras.layers.Dropout(0.2))
-model.add(tf.keras.layers.Dense(21, activation='softmax'))
+        frame = cv2.flip(frame, 1)
+        h, w, _ = frame.shape
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands_detector.process(frame_rgb)
 
-model.summary()
+        # Predição
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
+                xs = [int(lm.x * w) for lm in hand_landmarks.landmark]
+                ys = [int(lm.y * h) for lm in hand_landmarks.landmark]
+                xmin, xmax = max(0, min(xs)-15), min(w, max(xs)+15)
+                ymin, ymax = max(0, min(ys)-15), min(h, max(ys)+15)
+                roi = frame[ymin:ymax, xmin:xmax]
 
-epochs = 50
+                now = time.time()
+                if roi.size > 0 and now - last_predict_time >= PREDICT_INTERVAL_SEC:
+                    letra, conf = predict_roi(roi)
+                    last_predict_time = now
+                    if letra:
+                        cv2.putText(frame, f"{letra}: {conf:.2f}", (xmin, max(20, ymin-10)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
 
-model_check = tf.keras.callbacks.ModelCheckpoint(filepath ='modelo.h5', monitor='val_loss', save_best_only=True, verbose=1)
-earlystop = tf.keras.callbacks.EarlyStopping(monitor='val_loss',patience=30, verbose=1, restore_best_weights=True,)
+        cv2.imshow("Reconhecimento de Sinais", frame)
+        if cv2.waitKey(1) & 0xFF == 27:  # ESC para sair
+            break
 
-hist = model.fit(training_images, epochs = epochs, callbacks=[model_check, earlystop], verbose=1, validation_data = validation_images)
+    cap.release()
+    cv2.destroyAllWindows()
 
-score = model.evaluate(validation_images)
-print("Loss: ", score[0])
-
-print("Acc: , ", score[1])
+if __name__ == "__main__":
+    main()
