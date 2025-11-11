@@ -5,9 +5,10 @@ import numpy as np
 from collections import deque
 from tkinter import Tk, simpledialog
 import tkinter as tk
+import concurrent.futures # Importar para processamento assíncrono
 import os
 
-# Inicializar MediaPipe Face Mesh
+#inicializar MediaPipe
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=False,
@@ -17,7 +18,7 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_tracking_confidence=0.5
 )
 
-# Variáveis de controle
+#variáveis de controle
 mostrar_landmarks = False
 emotion_history = deque(maxlen=10)
 emocao_atual = "Identificando"
@@ -25,19 +26,21 @@ confianca = 0
 PATH_IMAGENS_ROSTO = "./rostos_salvos"
 nome_pessoa = ''
 
-# Configurar câmera
+#configurar câmera
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 680)
 cap.set(cv2.CAP_PROP_FPS, 60)
 
+# Inicializar ThreadPoolExecutor para tarefas pesadas
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
 def preprocessamento(face_roi):
-    """Pré-processa a região do rosto para análise"""
     try:
-        # Converter BGR para RGB
+        #converter BGR para RGB
         face_rgb = cv2.cvtColor(face_roi, cv2.COLOR_BGR2RGB)
         
-        # Redimensionar para o tamanho esperado pelo DeepFace
+        #redimensionar para o tamanho esperado pelo DeepFace
         face_resized = cv2.resize(face_rgb, (224, 224))
         
         return face_resized
@@ -46,9 +49,8 @@ def preprocessamento(face_roi):
         return None
 
 def analize_emocao(face_img):
-    """Análise simplificada de emoções"""
     try:
-        # Usar análise direta do deepface
+        #usar análise direta do deepface
         result = DeepFace.analyze(
             face_img,
             actions=['emotion'],
@@ -57,7 +59,7 @@ def analize_emocao(face_img):
             silent=True,
             align=True
         )
-        # Emoção dominante
+        #emoção dominante
         emotion = result[0]['dominant_emotion']
         confianca = result[0]['emotion'][emotion]
         
@@ -68,7 +70,6 @@ def analize_emocao(face_img):
         return "erro", 0
     
 def reconhecer_pessoa(face_img):
-    """Reconhece a pessoa comparando com rostos salvos"""
     try:
         if not os.path.exists(PATH_IMAGENS_ROSTO):
             os.makedirs(PATH_IMAGENS_ROSTO)
@@ -109,14 +110,15 @@ def reconhecer_pessoa(face_img):
     except Exception as e:
         print(f"Erro no reconhecimento: {e}")
         return "Erro no reconhecimento"
-def tratamento_imagem(path):
-    for imagens in os.listdir(path):
-        imagem = cv2.imread(os.path.join(path,imagens))
-        imagem_tratada = cv2.cvtColor(imagem, cv2.COLOR_BGR2RGB)
-        cv2.imwrite(f"{path}/{imagens}", imagem_tratada)
+# A função tratamento_imagem é redundante e será removida.
+# A imagem já é salva em RGB em salvar_rosto.
+# def tratamento_imagem(path):
+#     for imagens in os.listdir(path):
+#         imagem = cv2.imread(os.path.join(path,imagens))
+#         imagem_tratada = cv2.cvtColor(imagem, cv2.COLOR_BGR2RGB)
+#         cv2.imwrite(f"{path}/{imagens}", imagem_tratada)
  
 def salvar_rosto(frame):
-    """Salva o rosto atual com um nome"""
     #criar uma janela temporária com input de nome
     root = tk.Tk()
     root.withdraw()
@@ -132,12 +134,16 @@ def salvar_rosto(frame):
         caminho_arquivo = f"{PATH_IMAGENS_ROSTO}/{nome_arquivo}.jpg"
         #garante imagem rgb salva para reconhecimento posterior
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        cv2.imshow("imagem teste", frame)
+        # cv2.imshow("imagem teste", frame) # Comentado para evitar janela extra
         cv2.imwrite(caminho_arquivo, frame_rgb)
-        tratamento_imagem(PATH_IMAGENS_ROSTO)
+        # tratamento_imagem(PATH_IMAGENS_ROSTO) # Removido, pois é redundante
         print(f"Rosto salvo como: {caminho_arquivo}")    
     
     root.destroy()
+
+# Variáveis para armazenar os "futures" das tarefas assíncronas
+emotion_analysis_future = None
+recognition_future = None
 
 frame_count = 0
 face_roi_global = None
@@ -206,31 +212,45 @@ while True:
             face_roi = frame[y_min:y_max, x_min:x_max]
             face_roi_global = face_roi
             
-            #analisar a cada 10 frames para performance
-            if face_roi.size > 0 and frame_count % 10 == 0:
+            # Analisar emoção e reconhecimento em threads separadas para não travar o vídeo
+            if face_roi.size > 0:
                 try:
                     #pré-processar a imagem do rosto
                     processed_face = preprocessamento(face_roi)
                     processed_face_global = processed_face
                     
                     if processed_face is not None:
-                        emotion, conf = analize_emocao(processed_face)
-                        
-                        pessoa_reconhecida_global = reconhecer_pessoa(processed_face)
-                        
-                        if emotion != "erro" and conf > 20:
-                            emotion_history.append(emotion)
-                            emocao_atual = emotion
-                            confianca = conf
-                        else:
-                            emocao_atual = "Baixa Confiança"
-                            confianca = 0
+
+                        # Submeter análise de emoção a cada 10 frames
+                        if frame_count % 10 == 0 and (emotion_analysis_future is None or emotion_analysis_future.done()):
+                            emotion_analysis_future = executor.submit(analize_emocao, processed_face)
+
+                        # Submeter reconhecimento de pessoa a cada 30 frames (menos frequente, pois é mais pesado)
+                        if frame_count % 30 == 0 and (recognition_future is None or recognition_future.done()):
+                            recognition_future = executor.submit(reconhecer_pessoa, processed_face)
+
+                        # Verificar e obter resultados da análise de emoção
+                        if emotion_analysis_future and emotion_analysis_future.done():
+                            emotion, conf = emotion_analysis_future.result()
+                            if emotion != "erro" and conf > 20:
+                                emotion_history.append(emotion)
+                                emocao_atual = emotion
+                                confianca = conf
+                            else:
+                                emocao_atual = "Baixa Confiança"
+                                confianca = 0
+                            emotion_analysis_future = None # Resetar o future
+
+                        # Verificar e obter resultados do reconhecimento de pessoa
+                        if recognition_future and recognition_future.done():
+                            pessoa_reconhecida_global = recognition_future.result()
+                            recognition_future = None # Resetar o future
                     else:
                         emocao_atual = "Erro Processamento"
                         confianca = 0
                         
                 except Exception as e:
-                    print(f"Erro no loop principal: {e}")
+                    print(f"Erro ao submeter/obter resultados da análise: {e}")
                     emocao_atual = "Erro Análise"
                     confianca = 0
     
@@ -277,5 +297,6 @@ while True:
         else:
             print("Nenhum rosto detectado para salvar!")
 
+executor.shutdown(wait=True) # Garantir que todas as threads sejam encerradas
 cap.release()
 cv2.destroyAllWindows()
