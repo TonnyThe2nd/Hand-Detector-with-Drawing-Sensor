@@ -5,7 +5,7 @@ import numpy as np
 from collections import deque
 from tkinter import Tk, simpledialog
 import tkinter as tk
-import concurrent.futures # Importar para processamento assíncrono
+import concurrent.futures 
 import os
 
 #inicializar MediaPipe
@@ -32,7 +32,6 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 680)
 cap.set(cv2.CAP_PROP_FPS, 60)
 
-# Inicializar ThreadPoolExecutor para tarefas pesadas
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 def preprocessamento(face_roi):
@@ -75,18 +74,15 @@ def reconhecer_pessoa(face_img):
             os.makedirs(PATH_IMAGENS_ROSTO)
             return "Nenhum rosto cadastrado"
         
-        # Verificar se tem imagens no diretório
         imagens = os.listdir(PATH_IMAGENS_ROSTO)
         if not imagens:
             return "Nenhum rosto cadastrado"
         
-        # Comparar com cada imagem salva
         for imagem in imagens:
             if imagem.lower().endswith(('.jpg', '.jpeg', '.png')):
                 try:
                     caminho_imagem = os.path.join(PATH_IMAGENS_ROSTO, imagem)
                     
-                    # Verificar similaridade
                     result = DeepFace.verify(
                         face_img, 
                         caminho_imagem,
@@ -96,7 +92,6 @@ def reconhecer_pessoa(face_img):
                         distance_metric='cosine'
                     )
                     
-                    # Caso reconhecer
                     if result['verified']:
                         nome = os.path.splitext(imagem)[0]
                         return nome
@@ -110,8 +105,6 @@ def reconhecer_pessoa(face_img):
     except Exception as e:
         print(f"Erro no reconhecimento: {e}")
         return "Erro no reconhecimento"
-# A função tratamento_imagem é redundante e será removida.
-# A imagem já é salva em RGB em salvar_rosto.
 # def tratamento_imagem(path):
 #     for imagens in os.listdir(path):
 #         imagem = cv2.imread(os.path.join(path,imagens))
@@ -141,7 +134,6 @@ def salvar_rosto(frame):
     
     root.destroy()
 
-# Variáveis para armazenar os "futures" das tarefas assíncronas
 emotion_analysis_future = None
 recognition_future = None
 
@@ -212,7 +204,6 @@ while True:
             face_roi = frame[y_min:y_max, x_min:x_max]
             face_roi_global = face_roi
             
-            # Analisar emoção e reconhecimento em threads separadas para não travar o vídeo
             if face_roi.size > 0:
                 try:
                     #pré-processar a imagem do rosto
@@ -221,15 +212,12 @@ while True:
                     
                     if processed_face is not None:
 
-                        # Submeter análise de emoção a cada 10 frames
                         if frame_count % 10 == 0 and (emotion_analysis_future is None or emotion_analysis_future.done()):
                             emotion_analysis_future = executor.submit(analize_emocao, processed_face)
 
-                        # Submeter reconhecimento de pessoa a cada 30 frames (menos frequente, pois é mais pesado)
                         if frame_count % 30 == 0 and (recognition_future is None or recognition_future.done()):
                             recognition_future = executor.submit(reconhecer_pessoa, processed_face)
 
-                        # Verificar e obter resultados da análise de emoção
                         if emotion_analysis_future and emotion_analysis_future.done():
                             emotion, conf = emotion_analysis_future.result()
                             if emotion != "erro" and conf > 20:
@@ -239,12 +227,11 @@ while True:
                             else:
                                 emocao_atual = "Baixa Confiança"
                                 confianca = 0
-                            emotion_analysis_future = None # Resetar o future
+                            emotion_analysis_future = None 
 
-                        # Verificar e obter resultados do reconhecimento de pessoa
                         if recognition_future and recognition_future.done():
                             pessoa_reconhecida_global = recognition_future.result()
-                            recognition_future = None # Resetar o future
+                            recognition_future = None 
                     else:
                         emocao_atual = "Erro Processamento"
                         confianca = 0
@@ -297,6 +284,6 @@ while True:
         else:
             print("Nenhum rosto detectado para salvar!")
 
-executor.shutdown(wait=True) # Garantir que todas as threads sejam encerradas
+executor.shutdown(wait=True) 
 cap.release()
 cv2.destroyAllWindows()
